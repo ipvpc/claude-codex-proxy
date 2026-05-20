@@ -1,4 +1,4 @@
-# OpenAI proxy vars + Claude Code / Agent SDK vars are loaded from .env (see .env.example).
+# Clients use the active CLI (codex app-server or claude remote-control), not OpenAI/Anthropic API keys.
 services:
   codex-service:
     build:
@@ -11,18 +11,22 @@ services:
         required: false
     environment:
       CLI_SERVICE_PORT: ${CLI_SERVICE_PORT:-8110}
-      # codex = OpenAI/Codex HTTP proxy | claude = Claude Code CLI/SDK (proxy routes return 503)
       CLI_SERVICE_MODE: ${CLI_SERVICE_MODE:-codex}
+      CLI_SERVICE_SESSION_NAME: ${CLI_SERVICE_SESSION_NAME:-claude-codex-proxy}
+      CODEX_APP_SERVER_LISTEN: ${CODEX_APP_SERVER_LISTEN:-}
+      CLI_WS_AUTH_TOKEN: ${CLI_WS_AUTH_TOKEN:-}
+      CLI_WS_AUTH_TOKEN_FILE: ${CLI_WS_AUTH_TOKEN_FILE:-}
+      CLI_REMOTE_CONTROL_SPAWN: ${CLI_REMOTE_CONTROL_SPAWN:-}
+      CLI_REMOTE_CONTROL_VERBOSE: ${CLI_REMOTE_CONTROL_VERBOSE:-}
+    volumes:
+      - codex_home:/root/.codex
+      - claude_home:/root/.claude
     ports:
       - "${CLI_SERVICE_PORT:-8110}:${CLI_SERVICE_PORT:-8110}"
     restart: unless-stopped
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import os,urllib.request; p=os.environ.get('CLI_SERVICE_PORT','8110'); urllib.request.urlopen(f'http://127.0.0.1:{p}/health')\"",
-        ]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+    stdin_open: true
+    tty: true
+
+volumes:
+  codex_home:
+  claude_home:
