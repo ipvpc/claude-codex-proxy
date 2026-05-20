@@ -20,7 +20,7 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 RUN npm install -g @openai/codex
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN npm install -g @anthropic-ai/claude-code
 
 COPY app.py ./app.py
 
