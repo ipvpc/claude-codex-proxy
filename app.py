@@ -4,6 +4,7 @@ codex-service: internal proxy for OpenAI-compatible HTTP APIs used by Codex and 
 - Injects an API Bearer toward the configured upstream URL (not ChatGPT OAuth / Codex browser login).
 - Upstream key resolution: CODEX_SERVICE_UPSTREAM_API_KEY, then CODEX_SERVICE_OPENAI_API_KEY, then OPENAI_API_KEY.
 - Optional CODEX_SERVICE_CLIENT_KEY: require header X-Codex-Service-Client-Key for internal auth.
+- CLI_SERVICE_MODE=codex|claude selects one stack; entrypoint unsets the other's credentials (see .env.example).
 """
 
 from __future__ import annotations
@@ -16,7 +17,20 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from service_mode import (
+    configured_claude_keys,
+    configured_codex_keys,
+    mode_allows_claude_cli,
+    mode_allows_openai_proxy,
+    resolve_service_mode,
+)
+
 APP_NAME = "codex-service"
+
+try:
+    CLI_SERVICE_MODE = resolve_service_mode()
+except ValueError as exc:
+    raise SystemExit(str(exc)) from exc
 
 
 def _upstream_bearer_token() -> tuple[str, str]:
@@ -45,6 +59,59 @@ UPSTREAM_CHAT_COMPLETIONS_URL = os.getenv(
 ).strip()
 CLIENT_KEY = os.getenv("CODEX_SERVICE_CLIENT_KEY", "").strip()
 REQUEST_TIMEOUT = float(os.getenv("CODEX_SERVICE_REQUEST_TIMEOUT", "120"))
+
+# Claude Code CLI / Agent SDK env vars surfaced on GET / (names only, never values).
+CLAUDE_SDK_ENV_VARS: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "API_TIMEOUT_MS",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_AGENT_SDK_CLIENT_APP",
+    "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
+    "CLAUDE_AGENT_SDK_MCP_NO_PREFIX",
+    "CLAUDE_CODE_ENABLE_TASKS",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+)
+
+
+def _claude_sdk_env_status() -> dict[str, object]:
+    configured = [name for name in CLAUDE_SDK_ENV_VARS if os.getenv(name, "").strip()]
+    active = mode_allows_claude_cli(CLI_SERVICE_MODE)
+    return {
+        "active_in_current_mode": active,
+        "global_cli_package": "@anthropic-ai/claude-code",
+        "agent_sdk_package": "@anthropic-ai/claude-agent-sdk",
+        "configured_env_vars": configured,
+        "anthropic_api_key_configured": bool(os.getenv("ANTHROPIC_API_KEY", "").strip()),
+        "docs": "https://code.claude.com/docs/en/agent-sdk/typescript",
+        "env_reference": "https://code.claude.com/docs/en/env-vars",
+        "note": (
+            "Claude Code uses the Anthropic Messages API, not POST /v1/*. "
+            "Set CLI_SERVICE_MODE=claude and ANTHROPIC_* in .env; use `docker compose exec codex-service claude`."
+            if active
+            else "Inactive while CLI_SERVICE_MODE=codex. Switch mode in .env to enable Claude Code auth."
+        ),
+    }
+
+
+def _service_mode_status() -> dict[str, object]:
+    return {
+        "cli_service_mode": CLI_SERVICE_MODE,
+        "allowed_values": ["codex", "claude"],
+        "aliases": {"openai": "codex", "anthropic": "claude"},
+        "openai_proxy_enabled": mode_allows_openai_proxy(CLI_SERVICE_MODE),
+        "claude_cli_enabled": mode_allows_claude_cli(CLI_SERVICE_MODE),
+        "configured_codex_env_vars": configured_codex_keys(),
+        "configured_claude_env_vars": configured_claude_keys(),
+        "note": (
+            "Only one mode is active. entrypoint.sh unsets the other stack's credentials at startup."
+        ),
+    }
 
 POST_V1_ROUTES: dict[str, str] = {
     "responses": UPSTREAM_RESPONSES_URL,
@@ -85,6 +152,14 @@ def _filter_response_headers(headers: httpx.Headers) -> dict[str, str]:
 
 
 async def _proxy_post_upstream(upstream_url: str, request: Request) -> Response:
+    if not mode_allows_openai_proxy(CLI_SERVICE_MODE):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "OpenAI-compatible proxy is disabled (CLI_SERVICE_MODE=claude). "
+                "Use `docker compose exec codex-service claude` or set CLI_SERVICE_MODE=codex."
+            ),
+        )
     api_key, _key_source = _upstream_bearer_token()
     if not api_key:
         raise HTTPException(
@@ -162,7 +237,7 @@ async def enforce_client_key(request: Request, call_next):
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": APP_NAME}
+    return {"status": "ok", "service": APP_NAME, "cli_service_mode": CLI_SERVICE_MODE}
 
 
 @app.get("/")
@@ -170,7 +245,8 @@ async def root() -> dict[str, object]:
     _key, key_source = _upstream_bearer_token()
     return {
         "service": APP_NAME,
-        "post_paths": list(POST_V1_ROUTES.keys()),
+        "service_mode": _service_mode_status(),
+        "post_paths": list(POST_V1_ROUTES.keys()) if mode_allows_openai_proxy(CLI_SERVICE_MODE) else [],
         "upstreams": {
             "responses": UPSTREAM_RESPONSES_URL,
             "chat/completions": UPSTREAM_CHAT_COMPLETIONS_URL,
@@ -182,6 +258,7 @@ async def root() -> dict[str, object]:
             "401 from this path means upstream rejected the key or URL/key mismatch (e.g. OpenRouter key vs api.openai.com)."
         ),
         "client_key_required": bool(CLIENT_KEY),
+        "claude_code_sdk": _claude_sdk_env_status(),
     }
 
 

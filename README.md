@@ -4,14 +4,22 @@ Small **HTTP proxy** for OpenAI-compatible endpoints used by **Codex** (`POST /v
 
 Callers send a **placeholder** `Authorization` (or none); the proxy strips it and sends **`Authorization: Bearer <upstream key>`** (see key priority below).
 
-The Docker image also installs **Node.js 22**, **npm**, and the global **`@openai/codex`** CLI for experimentation (the default process is still the Python **FastAPI** app on port **8110**).
+The Docker image installs **Node.js 22**, **npm**, **`@openai/codex`**, and **`@anthropic-ai/claude-code`**, but only **one stack runs at a time**. Set **`CLI_SERVICE_MODE`** to `codex` (OpenAI HTTP proxy, default) or `claude` (Claude Code CLI/SDK; proxy routes return **503**). The entrypoint unsets the other provider’s credentials so Codex login and Claude login do not conflict.
 
 ## Quick start (Docker Compose)
 
-From the repo root, **`codex-service`** starts with the stack (no profile). **`agent-service`** defaults **`OPENAI_BASE_URL`** to **`http://codex-service:8110/v1`** and depends on **`codex-service`**.
+From this directory:
 
 ```bash
-docker compose up -d codex-service agent-service
+cp .env.example .env
+# Set CLI_SERVICE_MODE=codex or claude, then only the matching section in .env
+docker compose up -d --build
+```
+
+In a larger Alpha5 stack, **`agent-service`** may default **`OPENAI_BASE_URL`** to **`http://codex-service:8110/v1`** and depend on **`codex-service`** on the same Docker network.
+
+```bash
+docker compose up -d codex-service
 ```
 
 - Published port: **8110** (host and container).
@@ -33,14 +41,87 @@ curl -s http://localhost:8110/ | jq .
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `CLI_SERVICE_MODE` | No | `codex` | **`codex`**: enable OpenAI-compatible `POST /v1/*` proxy. **`claude`**: disable proxy; use Claude Code via `docker compose exec`. Aliases: `openai` → `codex`, `anthropic` → `claude`. |
+| `CLI_SERVICE_PORT` | No | `8110` | Listen port (Dockerfile / compose). |
+
+### codex mode (`CLI_SERVICE_MODE=codex`)
+
+Configure **only** these (Anthropic vars are removed at container start):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
 | `CODEX_SERVICE_UPSTREAM_API_KEY` | One of three | — | Highest priority Bearer for upstream (use for Docker secrets / dedicated key). |
 | `CODEX_SERVICE_OPENAI_API_KEY` | One of three | — | Second priority; use when `.env` **`OPENAI_API_KEY`** is an OpenRouter key but upstream is **`api.openai.com`**. |
 | `OPENAI_API_KEY` | One of three | — | Fallback upstream Bearer if the two above are unset. |
-| `CODEX_SERVICE_PORT` | No | `8110` | Listen port (Dockerfile / compose). |
 | `CODEX_SERVICE_UPSTREAM_RESPONSES_URL` | No | `https://api.openai.com/v1/responses` | Full URL for the upstream Responses endpoint (e.g. Azure OpenAI if you change it). |
 | `CODEX_SERVICE_UPSTREAM_CHAT_COMPLETIONS_URL` | No | `https://api.openai.com/v1/chat/completions` | Upstream for `POST /v1/chat/completions` (used by `agent-service`). |
 | `CODEX_SERVICE_CLIENT_KEY` | No | — | If set, every request except `/`, `/health`, `/docs`, `/openapi.json`, `/redoc` must send header **`X-Codex-Service-Client-Key`** with this exact value. |
 | `CODEX_SERVICE_REQUEST_TIMEOUT` | No | `120` | Upstream HTTP timeout (seconds). |
+
+### claude mode (`CLI_SERVICE_MODE=claude`)
+
+Configure **only** Claude vars (OpenAI / `CODEX_SERVICE_*` keys are removed at container start). The container still exposes **`GET /health`** and **`GET /`** for mode metadata; **`POST /v1/*`** returns **503**.
+
+#### Claude Code Agent SDK
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | For API billing | — | API key (`sk-ant-…`). When set, used instead of Claude subscription. [Console keys](https://platform.claude.com/settings/keys) |
+| `ANTHROPIC_BASE_URL` | No | Anthropic API | Override API endpoint (proxy / LLM gateway). |
+| `ANTHROPIC_MODEL` | No | Model default | Model id for CLI / SDK sessions. |
+| `API_TIMEOUT_MS` | No | `600000` | Upstream request timeout (ms). |
+| `CLAUDE_CODE_OAUTH_TOKEN` | No | — | Long-lived token for SDK / CI ([`claude setup-token`](https://code.claude.com/docs/en/authentication)). |
+| `CLAUDE_AGENT_SDK_CLIENT_APP` | No | — | App name in the Agent SDK User-Agent header. |
+| `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS` | No | — | Set `1` to disable built-in subagents in non-interactive (`-p`) mode. |
+| `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` | No | — | Set `1` to drop `mcp____` prefix on SDK MCP tool names. |
+| `CLAUDE_CODE_ENABLE_TASKS` | No | `1` | Set `0` to use legacy `TodoWrite` instead of Task tools. |
+
+Full list: [Claude Code environment variables](https://code.claude.com/docs/en/env-vars). Agent SDK reference: [TypeScript SDK](https://code.claude.com/docs/en/agent-sdk/typescript).
+
+**`GET /`** includes a `claude_code_sdk` object listing which Claude-related env vars are set (names only).
+
+#### TypeScript Agent SDK (your application)
+
+```bash
+npm install @anthropic-ai/claude-agent-sdk
+```
+
+```typescript
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
+for await (const message of query({
+  prompt: "Summarize this repo",
+  options: {
+    maxTurns: 3,
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
+      CLAUDE_AGENT_SDK_CLIENT_APP: "alpha5-cli-service",
+    },
+  },
+})) {
+  console.log(message);
+}
+```
+
+#### Claude Code CLI inside the container
+
+```bash
+# .env must have CLI_SERVICE_MODE=claude and ANTHROPIC_API_KEY=...
+docker compose up -d --build
+docker compose exec codex-service claude -p "List files in /app"
+```
+
+Ensure `.env` uses **`CLI_SERVICE_MODE=claude`** and `ANTHROPIC_API_KEY` (or run `claude /login` interactively). Optional project settings:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_MODEL": "claude-sonnet-4-6",
+    "API_TIMEOUT_MS": "600000"
+  }
+}
+```
 
 ## API behavior
 
@@ -114,6 +195,18 @@ model_provider = "alpha5-codex-service"
 ```
 
 Adjust `base_url` if you reach the host from outside Compose (e.g. `http://localhost:8110/v1`).
+
+## Claude Code CLI (host)
+
+On the host (outside Docker), install the CLI and point settings at the same keys as `.env.example`:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+export ANTHROPIC_API_KEY=sk-ant-...
+claude
+```
+
+Or add variables under `env` in `~/.claude/settings.json` — see [settings](https://code.claude.com/docs/en/configuration).
 
 ## Local run (without Docker)
 

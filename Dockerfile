@@ -4,7 +4,8 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    CODEX_SERVICE_PORT=8110
+    CLI_SERVICE_PORT=8110 \
+    CLI_SERVICE_MODE=codex
 
 # Node.js + npm (python:3.11-slim is Debian-based; Codex CLI is installed via npm)
 RUN apt-get update \
@@ -19,11 +20,15 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+# CLIs for shell use inside the container; configure via .env (ANTHROPIC_*, CLAUDE_*).
+# For programmatic agents, add @anthropic-ai/claude-agent-sdk in your app (see README).
 RUN npm install -g @openai/codex
 RUN npm install -g @anthropic-ai/claude-code
 
-COPY app.py ./app.py
+COPY app.py service_mode.py entrypoint.sh ./
+
+RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8110
 
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${CODEX_SERVICE_PORT:-8110}"]
+ENTRYPOINT ["/app/entrypoint.sh"]
