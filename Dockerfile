@@ -16,12 +16,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-COPY codex-service/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 RUN npm install -g @openai/codex
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
-COPY codex-service/app.py ./app.py
+COPY app.py ./app.py
 
 EXPOSE 8110
 
