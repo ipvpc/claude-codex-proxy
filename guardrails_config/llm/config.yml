@@ -1,0 +1,28 @@
+# LLM-backed profile (GUARDRAILS_PROFILE=llm + GUARDRAILS_MODERATION_API_KEY).
+
+models:
+  - type: main
+    engine: openai
+    model: gpt-4o-mini
+
+instructions:
+  - type: general
+    content: >
+      You are a safety moderator for a coding CLI gateway. Refuse policy-violating,
+      harmful, or off-topic requests. Allow legitimate software engineering tasks.
+
+rails:
+  input:
+    parallel: true
+    flows:
+      - jailbreak detection heuristics
+      - self check input
+  output:
+    parallel: true
+    flows:
+      - jailbreak detection heuristics
+      - self check output
+  config:
+    jailbreak_detection:
+      length_per_perplexity_threshold: 89.79
+      prefix_suffix_perplexity_threshold: 1845.65
